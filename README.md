@@ -21,7 +21,7 @@ modes.
 ### Prerequisites
 
 - Go 1.22.2 or later
-- A running instance of a compatible language model API (e.g., Ollama)
+- A running instance of a compatible language model API (e.g., [Ollama](https://ollama.ai/))
 
 ### Building from Source
 
@@ -140,4 +140,51 @@ This project is licensed under the terms specified in the LICENSE file.
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+We welcome contributions to Gaia! Please feel free to submit a Pull Request.
+
+To contribute:
+
+1.  **Fork the repository.**
+2.  **Create a new branch** for your feature or bug fix:
+    ```bash
+    git checkout -b feature/your-feature-name
+    ```
+    or
+    ```bash
+    git checkout -b fix/your-bug-fix-name
+    ```
+3.  **Make your changes.** Ensure your code adheres to the existing style and that all tests pass.
+4.  **Commit your changes** with a clear and descriptive commit message.
+5.  **Push your branch** to your forked repository.
+6.  **Open a Pull Request** to the `main` branch of the `vonglasow/gaia` repository.
+    - Provide a clear title and description for your PR.
+    - Link any relevant issues.
+
+### Reporting Bugs or Requesting Features
+
+If you find a bug or have a feature request, please open an issue on GitHub.
+Provide as much detail as possible, including steps to reproduce the bug or a
+clear description of the desired feature.
+
+### Development Environment
+
+Ensure you have Go installed (see Prerequisites). You can build the project
+using:
+
+```bash
+go build
+```
+
+Run tests using:
+
+```bash
+go test ./...
+```
+
+We use `pre-commit` to maintain code quality. Please install it and set up the
+hooks:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
