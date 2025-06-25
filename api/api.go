@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -12,8 +13,15 @@ import (
 	"github.com/charmbracelet/bubbles/progress"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/spf13/viper"
+	// "github.com/spf13/viper" // Removed
+	// "os" // Removed
+	"time"
 )
+
+// Allow overriding tea.NewProgram for tests
+var newProgram = func(model tea.Model, opts ...tea.ProgramOption) *tea.Program {
+	return tea.NewProgram(model, opts...)
+}
 
 // Constants for UI styling
 const (
@@ -23,6 +31,73 @@ const (
 
 // Styling for help text
 var helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#626262")).Render
+
+// APIClient manages interactions with the API
+type APIClient struct {
+	BaseURL    string
+	HTTPClient *http.Client
+	ModelName  string
+}
+
+// NewAPIClient creates a new API client
+func NewAPIClient(host, port, modelName string) *APIClient {
+	return &APIClient{
+		BaseURL: fmt.Sprintf("http://%s:%s", host, port), // BaseURL does not include /api
+		HTTPClient: &http.Client{
+			Timeout: 30 * time.Second, // 30-second timeout
+		},
+		ModelName: modelName,
+	}
+}
+
+// getURL constructs the full URL for a given API endpoint path
+func (c *APIClient) getURL(endpointPath string) string {
+	// Ensure endpointPath starts with a "/"
+	if !strings.HasPrefix(endpointPath, "/") {
+		endpointPath = "/" + endpointPath
+	}
+	return c.BaseURL + "/api" + endpointPath // Adds /api segment
+}
+
+// doGetRequest performs a GET request and returns the response
+func (c *APIClient) doGetRequest(url string) (*http.Response, error) {
+	resp, err := c.HTTPClient.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// doPostRequest performs a POST request and returns the response
+func (c *APIClient) doPostRequest(url string, body []byte) (*http.Response, error) {
+	resp, err := c.HTTPClient.Post(url, "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// ChatSession stores the conversation history for a session
+type ChatSession struct {
+	History []Message
+}
+
+// NewChatSession creates a new, empty chat session.
+func NewChatSession() *ChatSession {
+	return &ChatSession{
+		History: make([]Message, 0), // Initialize history slice
+	}
+}
+
+// AddMessage appends a message to the chat history
+func (cs *ChatSession) AddMessage(role, content string) {
+	cs.History = append(cs.History, Message{Role: role, Content: content})
+}
+
+// GetHistory returns the chat history
+func (cs *ChatSession) GetHistory() []Message {
+	return cs.History
+}
 
 // Message structure for API interactions
 type Message struct {
@@ -100,35 +175,28 @@ func (m *ProgressModel) View() string {
 		pad + helpStyle("Press 'q' to cancel")
 }
 
-// ChatHistory stores the conversation history
-var chatHistory []Message
-
-// Main function to process messages and ensure the model exists before sending
-func ProcessMessage(msg string) error {
-	if err := checkAndPullIfRequired(); err != nil {
+// ProcessMessage processes the user message, manages history, and sends it to the API
+func (c *APIClient) ProcessMessage(session *ChatSession, userMessage string, systemMessage string) error {
+	if err := c.CheckAndPullModel(); err != nil {
 		return err
 	}
 
-	// Add user message to history
-	chatHistory = append(chatHistory, Message{
-		Role:    "user",
-		Content: msg,
-	})
+	session.AddMessage("user", userMessage)
 
-	return sendMessage(msg)
+	return c.sendMessage(session, systemMessage)
 }
 
-// Function to check if the model exists and pull it if necessary
-func checkAndPullIfRequired() error {
-	url := fmt.Sprintf("http://%s:%d/api/tags", viper.GetString("host"), viper.GetInt("port"))
+// CheckAndPullModel checks if the model exists and pulls it if necessary
+func (c *APIClient) CheckAndPullModel() error {
+	url := c.getURL("/tags") // Changed: path should be relative to /api
 
-	resp, err := http.Get(url)
+	resp, err := c.doGetRequest(url)
 	if err != nil {
 		return fmt.Errorf("failed to fetch tags: %v", err)
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
-			fmt.Printf("Error closing response body: %v\n", err)
+			log.Printf("Error closing response body: %v", err)
 		}
 	}()
 
@@ -144,38 +212,46 @@ func checkAndPullIfRequired() error {
 
 	modelExists := false
 	for _, model := range tagsResponse.Models {
-		if strings.Split(model.Name, ":")[0] == viper.GetString("model") {
+		if strings.Split(model.Name, ":")[0] == c.ModelName {
 			modelExists = true
 			break
 		}
 	}
 
 	if !modelExists {
-		fmt.Printf("Model %s not found, pulling...\n", viper.GetString("model"))
-		return pullModel()
+		log.Printf("Model %s not found, pulling...\n", c.ModelName) // Changed from fmt.Printf
+		return c.pullModel()
 	}
 
 	return nil
 }
 
-// Pull the model using a progress bar
-func pullModel() error {
-	pullURL := fmt.Sprintf("http://%s:%d/api/pull", viper.GetString("host"), viper.GetInt("port"))
-	pullData := map[string]string{"name": viper.GetString("model")}
-	pullDataBytes, _ := json.Marshal(pullData)
+// pullModel pulls the model using a progress bar
+func (c *APIClient) pullModel() error {
+	pullURL := c.getURL("/pull") // Changed: path should be relative to /api
+	pullData := map[string]string{"name": c.ModelName}
+	pullDataBytes, err := json.Marshal(pullData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal pull data: %v", err)
+	}
 
-	resp, err := http.Post(pullURL, "application/json", bytes.NewBuffer(pullDataBytes))
+	resp, err := c.doPostRequest(pullURL, pullDataBytes)
 	if err != nil {
 		return fmt.Errorf("failed to pull model: %v", err)
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
-			fmt.Printf("Error closing response body: %v\n", err)
+			log.Printf("Error closing response body: %v", err)
 		}
 	}()
 
-	model := &ProgressModel{progress: progress.New(progress.WithWidth(50))}
-	p := tea.NewProgram(model)
+	// Ensure progress.WithWidth is a valid option if used, or use a default.
+	// For example, progress.WithDefaultGradient() is a common one.
+	// The test specified WithWidth(50), let's see if that's okay or if we should use a more standard default.
+	// Let's assume WithWidth is fine, if not, tests might fail and we can adjust.
+	// The critical part is `newProgram` call.
+	model := &ProgressModel{progress: progress.New(progress.WithWidth(50))} // Default from original code
+	p := newProgram(model)                                                  // Changed tea.NewProgram to newProgram
 
 	go func() {
 		decoder := json.NewDecoder(resp.Body)
@@ -185,6 +261,9 @@ func pullModel() error {
 				Total     int64 `json:"total"`
 			}
 			if err := decoder.Decode(&pullResponse); err != nil {
+				if err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") {
+					log.Printf("Error decoding pull progress: %v", err)
+				}
 				break
 			}
 			p.Send(struct {
@@ -202,22 +281,19 @@ func pullModel() error {
 	return nil
 }
 
-// Send a message to the API
-func sendMessage(msg string) error {
-	// Prepare messages with history
+// sendMessage sends the accumulated messages to the API
+func (c *APIClient) sendMessage(session *ChatSession, systemMessage string) error {
 	messages := make([]Message, 0)
-
-	// Add system message
-	messages = append(messages, Message{
-		Role:    "system",
-		Content: "System message",
-	})
-
-	// Add chat history
-	messages = append(messages, chatHistory...)
+	if systemMessage != "" {
+		messages = append(messages, Message{
+			Role:    "system",
+			Content: systemMessage,
+		})
+	}
+	messages = append(messages, session.GetHistory()...)
 
 	request := APIRequest{
-		Model:    viper.GetString("model"),
+		Model:    c.ModelName,
 		Messages: messages,
 		Stream:   true,
 	}
@@ -227,21 +303,19 @@ func sendMessage(msg string) error {
 		return fmt.Errorf("failed to marshal JSON request: %v", err)
 	}
 
-	url := fmt.Sprintf("http://%s:%d/api/chat", viper.GetString("host"), viper.GetInt("port"))
-	contentType := "application/json"
+	url := c.getURL("/chat") // Changed: path should be relative to /api
 
-	resp, err := http.Post(url, contentType, bytes.NewBuffer(requestBody))
+	resp, err := c.doPostRequest(url, requestBody)
 	if err != nil {
 		return fmt.Errorf("failed to make HTTP request: %v", err)
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
-			fmt.Printf("Error closing response body: %v\n", err)
+			log.Printf("Error closing response body: %v", err)
 		}
 	}()
 
-	// Process the response and add it to history
-	var responseContent string
+	var responseContent strings.Builder
 	decoder := json.NewDecoder(resp.Body)
 	for {
 		var apiResp APIResponse
@@ -257,16 +331,12 @@ func sendMessage(msg string) error {
 
 		if apiResp.Message != nil {
 			fmt.Print(apiResp.Message.Content)
-			responseContent += apiResp.Message.Content
+			responseContent.WriteString(apiResp.Message.Content)
 		}
 	}
 	fmt.Println()
 
-	// Add assistant response to history
-	chatHistory = append(chatHistory, Message{
-		Role:    "assistant",
-		Content: responseContent,
-	})
+	session.AddMessage("assistant", responseContent.String())
 
 	return nil
 }
